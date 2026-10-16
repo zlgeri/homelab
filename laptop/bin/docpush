@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# docpush — thin wrapper: push the Documents folder into the Pi buffer with pi-push.
+export PI_SRC="$HOME/Documents" PI_DEST="pi:/srv/buffer/for-pc/Documents/"
+exec pi-push "$@"

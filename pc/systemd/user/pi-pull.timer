@@ -1,0 +1,13 @@
+# ~/.config/systemd/user/pi-pull.timer
+# Enable with: systemctl --user enable --now pi-pull.timer
+[Unit]
+Description=Run pi-pull every 10 minutes
+
+[Timer]
+# first run 2 minutes after the user manager starts (gives the network and VPN time to come up)
+OnBootSec=2min
+# then 10 minutes after each previous run
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

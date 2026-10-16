@@ -1,0 +1,9 @@
+# ~/.config/systemd/user/pi-pull.service
+[Unit]
+Description=Pull files from the Pi buffer (laptop -> PC)
+
+[Service]
+# oneshot: run to completion and exit (not a long-running daemon)
+Type=oneshot
+# %h expands to the user's home directory
+ExecStart=%h/.local/bin/pi-pull

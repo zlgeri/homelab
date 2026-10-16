@@ -1,0 +1,15 @@
+# Secrets and machine-specific config: never commit these, ship *.example files instead
+*.env
+!*.env.example
+*.pem
+*.key
+id_*
+cert.pem
+/pi/etc/cloudflared/*.json
+/pi/etc/cloudflared/config.yml
+
+# Local leftovers
+*.bak
+*~
+*.swp
+.directory

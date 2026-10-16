@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# pi-pull — fetch everything waiting in the Pi buffer onto the PC, then remove it from the Pi.
+# Run by a systemd user timer (see ../systemd/user/). Safe to run by hand as well.
+set -euo pipefail
+# -e: exit on the first error   -u: unset variables are errors   pipefail: a failing stage fails the pipe
+
+SRC="pi:/srv/buffer/for-pc/"            # the Pi's inbox
+DEST="$HOME/FromLaptop/"                # where files land on the PC
+BACKUP=".overwritten/$(date +%F_%H%M%S)" # if a local file would be overwritten, keep the old one here
+
+mkdir -p "$DEST"
+
+# Single-instance lock, so overlapping timer runs can't step on each other.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/pi-pull.lock"
+flock -n 9 || { echo "already running, exiting"; exit 0; }
+
+# BatchMode: never prompt (nobody is there to answer when the timer runs).
+# ConnectTimeout: give up after 10 s instead of hanging.
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10"
+
+# Pi unreachable (no network, VPN down)? Exit quietly; the next timer run retries.
+if ! ssh $SSH_OPTS pi true 2>/dev/null; then
+  echo "Pi not reachable, will retry next time"
+  exit 0
+fi
+
+#  -a                    keep directory structure, timestamps, permissions
+#  --remove-source-files delete each file on the Pi only AFTER it was transferred successfully
+#  --backup-dir          never silently overwrite a local file; move the old copy aside
+#  --out-format='%n'     print one line per transferred item (used for the summary below)
+# The sender (pi-push) writes into a temp dir outside the inbox, so only complete files are visible here.
+out=$(rsync -a --remove-source-files -e "ssh $SSH_OPTS" \
+        --backup --backup-dir="$BACKUP" \
+        --out-format='%n' "$SRC" "$DEST")
+
+# rsync removes files but not the directories they lived in; clean up empty ones.
+#   -mindepth 2  keep the top-level inbox folders themselves
+#   -mmin +10    only directories untouched for 10 minutes, so we never race an upload in progress
+ssh $SSH_OPTS pi "find /srv/buffer/for-pc -mindepth 2 -type d -empty -mmin +10 -delete" || true
+
+# Directory lines end with "/", file lines don't.
+files=$(grep -c '[^/]$' <<<"$out" || true)
+
+if [ "$files" -gt 0 ]; then
+  echo "$files file(s) arrived:"
+  grep '[^/]$' <<<"$out"
+  # Desktop notification if a notification daemon is running (mako, dunst, swaync, ...).
+  command -v notify-send >/dev/null && notify-send "pi-pull" "$files new file(s) from the laptop → ~/FromLaptop" || true
+else
+  echo "no new files"
+fi

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# pi-push — a "git push"-style uploader into the Pi buffer.
+# Runs only when you call it and sends only files that changed since the last successful push.
+#
+#   pi-push [-n] [-y] [--all | --from-now] [DIR]
+#     -n          dry run: show what would be sent, change nothing
+#     -y          don't ask for confirmation (for scripts / timers)
+#     --all       send EVERY file in DIR (use this on the first run if you want everything)
+#     --from-now  send nothing, just start tracking changes from now on
+#
+#   Environment: PI_SRC, PI_DEST, PI_TMP, PI_RESERVE_MB, PI_DF_CMD
+#
+# Exit codes: 0 ok / nothing to do, 1 aborted by user, 2 first run needs --all or --from-now,
+#             3 cannot query free space on the Pi, 4 not enough space, 5 needs -y when non-interactive,
+#             64 bad option, 66 source directory missing.
+set -euo pipefail
+
+SRC="${PI_SRC:-$HOME/ToPC}"
+DEST="${PI_DEST:-pi:/srv/buffer/for-pc/}"
+RTMP="${PI_TMP:-/srv/buffer/.tmp}"                 # on the Pi, OUTSIDE the inbox (see rsync below)
+RESERVE_MB="${PI_RESERVE_MB:-1024}"                # always keep this much free space on the Pi
+DF_CMD="${PI_DF_CMD:-ssh -o BatchMode=yes -o ConnectTimeout=10 ${DEST%%:*} 'df -B1 --output=avail /srv/buffer | tail -n1'}"
+
+dry=0; yes=0; first=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--dry-run) dry=1 ;;
+    -y|--yes) yes=1 ;;
+    --all|--from-now) first="$1" ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; exit 64 ;;
+    *) SRC="$1" ;;
+  esac
+  shift
+done
+
+[ -d "$SRC" ] || { echo "no such directory: $SRC" >&2; exit 66; }
+SRC="$(cd "$SRC" && pwd)"
+
+# Separate state per (source, destination) pair, so several folders can be tracked independently.
+KEY="$(printf '%s\n%s' "$SRC" "$DEST" | sha1sum | cut -c1-10)"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/pi-push/$KEY"
+mkdir -p "$STATE"
+printf '%s -> %s\n' "$SRC" "$DEST" > "$STATE/info"
+
+# Single-instance lock.
+exec 9>"$STATE/lock"
+flock -n 9 || { echo "already running"; exit 0; }
+
+LIST="$STATE/list"
+# Timestamp taken BEFORE scanning: files modified during the upload are picked up next time.
+START="$(mktemp "$STATE/start.XXXXXX")"
+trap 'rm -f "$START" "$LIST"' EXIT
+
+# ---- reference point for "changed since"
+ref="$STATE/marker"
+case "$first" in
+  --from-now)
+    if [ "$dry" = 1 ]; then echo "(dry run) nothing changed."; exit 0; fi
+    mv "$START" "$STATE/marker"
+    echo "OK: tracking changes from now on in: $SRC"
+    exit 0 ;;
+  --all)
+    ref="$STATE/epoch"; touch -d @0 "$ref" ;;
+esac
+if [ ! -e "$ref" ]; then
+  cat >&2 <<EOT
+First run for this directory ($SRC). Choose one:
+  pi-push --all         # send EVERY file in the directory
+  pi-push --from-now    # only track files that change from now on
+EOT
+  exit 2
+fi
+
+# ---- changed files (by ctime, so copied / renamed files with an old mtime are caught too)
+cd "$SRC"
+find . -type f -cnewer "$ref" \
+  -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.cache/*' -not -path '*/__pycache__/*' \
+  -not -path '*/vendor/*' -not -path '*/.venv/*' -not -path '*/bin/Debug/*' -not -path '*/bin/Release/*' \
+  -not -path '*/obj/*' -not -path '*/.stfolder/*' \
+  -not -name '*.tmp' -not -name '*.part' -not -name '*.crdownload' -not -name '*~' \
+  -not -name '.~lock*' -not -name '*.swp' -not -name '.directory' \
+  -printf '%P\0' > "$LIST"
+
+n=$(tr -cd '\0' < "$LIST" | wc -c)
+[ "$n" -gt 0 ] || { echo "no new files"; exit 0; }
+total=$(xargs -0 -a "$LIST" stat -c %s -- | awk '{s+=$1} END{print s+0}')
+
+# ---- free space on the Pi
+avail=$(bash -c "$DF_CMD" 2>/dev/null | tr -dc '0-9' || true)
+[ -n "$avail" ] || { echo "Cannot query free space on the Pi (is it reachable? is the VPN up?)." >&2; exit 3; }
+need=$(( total + RESERVE_MB * 1024 * 1024 ))
+
+echo "$n file(s), $(numfmt --to=iec "$total") · free on the Pi: $(numfmt --to=iec "$avail") (plus ${RESERVE_MB} MB reserve)"
+echo "Largest:"
+{ xargs -0 -a "$LIST" stat -c '%s %n' -- | sort -rn | head -n 15 \
+    | while read -r sz name; do printf '  %8s  %s\n' "$(numfmt --to=iec "$sz")" "$name"; done; } || true
+[ "$n" -le 15 ] || echo "  ... and $((n - 15)) more files"
+
+if [ "$need" -gt "$avail" ]; then
+  echo "TOO BIG: this does not fit on the Pi. Nothing was sent." >&2
+  echo "Tip: push a smaller subdirectory (pi-push DIR) or move the large files another way." >&2
+  exit 4
+fi
+
+if [ "$dry" = 1 ]; then echo "(dry run, nothing was sent)"; exit 0; fi
+if [ "$yes" != 1 ]; then
+  if [ -t 0 ]; then
+    read -r -p "Send? [y/N] " a
+    [[ "$a" =~ ^[yY]$ ]] || { echo "Aborted."; exit 1; }
+  else
+    echo "Non-interactive run: -y is required." >&2; exit 5
+  fi
+fi
+
+# NO --partial: a half-written file must never appear in the inbox, otherwise the PC would pull
+# it and delete it from the Pi. --temp-dir keeps in-flight files outside the inbox; rsync then
+# renames each finished file into place atomically.
+prog=(); [ -t 1 ] && prog=(--info=progress2)      # progress bar only on a terminal
+rsync -a --from0 --files-from="$LIST" --temp-dir="$RTMP" ${prog[@]+"${prog[@]}"} \
+  -e "ssh -o BatchMode=yes -o ConnectTimeout=10" ./ "$DEST"
+
+mv "$START" "$STATE/marker"      # only reached on success (set -e)
+echo "done: $n file(s), $(numfmt --to=iec "$total")"

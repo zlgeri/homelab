@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# pc-wake — wake the gaming PC with Wake-on-LAN and wait until Sunshine is ready to stream.
+#
+# Runs on the Pi, which sits on the same LAN as the PC (magic packets don't cross routers).
+# Configuration: ~/.config/pc-wake.env, e.g.
+#   PC_MAC=aa:bb:cc:dd:ee:ff   # MAC of the PC's wired NIC
+#   PC_IP=100.x.y.z            # the PC's VPN (NetBird) IP
+set -u
+
+[ -r "$HOME/.config/pc-wake.env" ] && . "$HOME/.config/pc-wake.env"
+MAC="${PC_MAC:?set PC_MAC in ~/.config/pc-wake.env}"
+# An IP rather than a hostname on purpose: this keeps working even if DNS on the Pi breaks.
+IP="${PC_IP:?set PC_IP in ~/.config/pc-wake.env}"
+PORT="${PC_PORT:-47989}"     # a Sunshine port: once it answers, a stream can be started
+TIMEOUT="${PC_TIMEOUT:-180}" # seconds to wait
+
+# Bash feature: opening /dev/tcp/HOST/PORT performs a TCP connect. Success means something is
+# listening there. We probe Sunshine instead of pinging, because the PC answers pings long
+# before the desktop session (and therefore Sunshine) is up.
+sunshine_up() { timeout 2 bash -c "</dev/tcp/$IP/$PORT" 2>/dev/null; }
+
+if sunshine_up; then
+  echo "The PC is already running and Sunshine is ready. Start Moonlight."
+  exit 0
+fi
+
+wakeonlan "$MAC" >/dev/null
+echo -n "Magic packet sent, waiting"
+
+for ((i=0; i<TIMEOUT; i+=5)); do
+  if sunshine_up; then
+    echo
+    echo "Ready after ${i}s. Start Moonlight."
+    exit 0
+  fi
+  echo -n "."
+  sleep 5
+done
+
+echo
+echo "Not up after ${TIMEOUT}s. Check power and the network cable."
+exit 1
