@@ -9,9 +9,12 @@ SRC="${SITE_SRC:-$HOME/Projects/terminal-cv}"   # local working copy of the site
 REMOTE="${SITE_REMOTE:-pi:/var/www/portfolio/}" # nginx document root on the Pi
 URL="${SITE_URL:-https://example.com}"          # public URL served through the Cloudflare Tunnel
 
+# Repository-only files that must not be published on the web server.
+EXCLUDES=(--exclude '.git' --exclude '.gitignore' --exclude 'README.md' --exclude 'LICENSE')
+
 # 1) Mirror the site. --delete removes files that no longer exist locally;
 #    --chmod makes sure nginx can read everything regardless of local permissions.
-rsync -ai --delete --chmod=D755,F644 --exclude '.git' "$SRC/" "$REMOTE"
+rsync -ai --delete --chmod=D755,F644 "${EXCLUDES[@]}" "$SRC/" "$REMOTE"
 
 # 2) Purge the edge cache. The token is passed to curl on stdin (-K -), so it never shows up
 #    in the process list or in shell history.
@@ -23,7 +26,7 @@ echo "cache purged, warming up..."
 
 # 3) Warm-up: request every file once so the edge holds a fresh copy even if the Pi goes
 #    offline later. The leading empty line requests the site root ("/").
-{ echo; (cd "$SRC" && find . -type f -not -path './.git/*' -printf '%P\n'); } | while IFS= read -r f; do
+{ echo; (cd "$SRC" && find . -type f -not -path './.git/*' -not -name '.gitignore' -not -name 'README.md' -not -name 'LICENSE' -printf '%P\n'); } | while IFS= read -r f; do
   curl -s -o /dev/null "$URL/$f"
 done
 echo done
