@@ -172,6 +172,13 @@ API tokens, tunnel credentials, SSH keys, real MAC/VPN addresses and usernames. 
 ship as `*.example` or read them from a local config file (`~/.config/...`), and `.gitignore` blocks
 the usual suspects.
 
+## How this was built
+
+With AI assistance: I used Claude (Anthropic) as a pair-programming partner and tutor throughout the
+project, for drafting scripts and configs, explaining the underlying concepts, and debugging problems
+step by step. Every part was set up, run and verified on my own machines, and the measurements above are
+from my own tests. The English comments and documentation were also written with its help.
+
 ## License
 
 [MIT](LICENSE)
